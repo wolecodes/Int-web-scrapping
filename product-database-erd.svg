@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400">
+  <rect x="50" y="50" width="200" height="200" fill="#f1f1f1" stroke="#ccc" />
+  <text x="100" y="80" font-size="16" font-weight="bold">Products</text>
+  <text x="70" y="110" font-size="14">id (PK)</text>
+  <text x="70" y="130" font-size="14">title</text>
+  <text x="70" y="150" font-size="14">price</text>
+  <text x="70" y="170" font-size="14">discount</text>
+  <text x="70" y="190" font-size="14">rating</text>
+  <text x="70" y="210" font-size="14">review_count</text>
+  <text x="70" y="230" font-size="14">amount_bought</text>
+  <text x="70" y="250" font-size="14">category</text>
+</svg>
