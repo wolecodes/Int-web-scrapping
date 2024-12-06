@@ -1,134 +1,162 @@
+import os
 import time
-import re
+import logging
 import pandas as pd
 import psycopg2
+from typing import List, Dict
 from selenium import webdriver
-from selenium.webdriver import ChromeOptions
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
-# Database connection parameters
-DB_NAME = "amazon_scrapping"
-DB_USER = "amazon_scrapping_user"
-DB_PASSWORD = "FN0kTUfCu7wTMqWn51gvICSqbHKMPECB"
-DB_HOST = "dpg-ct98nc0gph6c739u2qog-a.oregon-postgres.render.com"
-DB_PORT = "5432"
 
-# Function to connect to PostgreSQL
-def connect_to_db():
-    return psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+class AmazonScraper:
+    def __init__(self, db_config: Dict[str, str]):
+        self.db_config = db_config
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s - %(levelname)s: %(message)s"
+        )
+        self.logger = logging.getLogger(__name__)
 
-# Function to scrape Amazon product data
-def scrape_amazon_products(category_url):
-    chrome_options = ChromeOptions()
-    chrome_options.add_argument("--headless=new")
-    
-    driver = webdriver.Chrome(options=chrome_options)
-
-    # Set custom headers
-    driver.execute_cdp_cmd('Network.setUserAgentOverride', {
-        'userAgent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.61 Safari/537.36'
-    })
-    
-    driver.execute_cdp_cmd('Network.enable', {})
-    driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
-        'headers': {
-            'dnt': '1',
-            'upgrade-insecure-requests': '1',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-            'sec-fetch-site': 'same-origin',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-user': '?1',
-            'sec-fetch-dest': 'document',
-            'referer': 'https://www.amazon.com/',
-            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8'
-        }
-    })
-    products = []
-
-    for i in range(1, 6):  # Scraping first 5 pages
-        url = f"{category_url}&page={i}"
-        driver.get(url)
-
-        # Wait for the product elements to load
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "h2 > a > span"))
+    def _setup_webdriver(self) -> webdriver.Chrome:
+        """Configure Chrome webdriver with optimal settings."""
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
 
-        # Extract product details
-        product_elements = driver.find_elements(By.CSS_SELECTOR, "div[data-component-type='s-search-result']")
-        for product in product_elements:
-            title = product.find_element(By.CSS_SELECTOR, "h2 > a > span").text.strip() 
-            price = product.find_element(By.CSS_SELECTOR, ".a-price-whole").text.strip() if product.find_elements(By.CSS_SELECTOR, ".a-price-whole") else "N/A"
-            discount = product.find_element(By.CSS_SELECTOR, ".a-price.a-price-secondary").text.strip() if product.find_elements(By.CSS_SELECTOR, ".a-price.a-price-secondary") else "N/A"
-            rating = product.find_element(By.CSS_SELECTOR, ".a-icon-alt").text.strip() if product.find_elements(By.CSS_SELECTOR, ".a-icon-alt") else "N/A"
-            review_count = product.find_element(By.CSS_SELECTOR, ".a-size-base").text.strip() if product.find_elements(By.CSS_SELECTOR, ".a-size-base") else "N/A"
-            amount_bought = "N/A"  # Placeholder, as this data may not be directly available
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
 
-            products.append({
-                'title': title,
-                'price': price,
-                'discount': discount,
-                'rating': rating,
-                'review_count': review_count,
-                'amount_bought': amount_bought
-            })
+        # Set page load timeout
+        driver.set_page_load_timeout(30)
+        return driver
 
-    driver.quit()
-    return products
+    def scrape_amazon_products(
+        self, category_url: str, max_pages: int = 5
+    ) -> List[Dict]:
+        """
+        Scrape Amazon product details with error handling and retry mechanism.
 
-# Function to save products to PostgreSQL
-def save_to_db(products):
-    connection = connect_to_db()
-    cursor = connection.cursor()
+        Args:
+            category_url (str): Amazon category search URL
+            max_pages (int): Maximum number of pages to scrape
 
-    insert_query = """
-        INSERT INTO Products (name, price, discount, rating, review_count, amount_bought, category)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """
+        Returns:
+            List[Dict]: Scraped product information
+        """
+        products = []
+        driver = self._setup_webdriver()
 
-    for product in products:
-        review_count = product['review_count'] if product['review_count'] not in ["N/A", ""] else "N/A"
-        amount_bought = product['amount_bought'] if product['amount_bought'] not in ["N/A", ""] else "N/A"
-        price = product['price'] if product['price'] not in ["N/A", ""] else "N/A"
-        discount = product['discount'] if product['discount'] not in ["N/A", ""] else "N/A"
-        rating = product['rating'] if product['rating'] not in ["N/A", ""] else "N/A"
-        # Print the values being inserted for debugging
-        print(f"Inserting: {product['title']}, {price}, {discount}, {rating}, {review_count}, {amount_bought}")
+        try:
+            for page in range(1, max_pages + 1):
+                url = f"{category_url}&page={page}"
+                driver.get(url)
 
-    try:
-        cursor.execute(insert_query, (
-            product['title'],
-            price,
-            discount,
-            rating,
-            review_count,
-            amount_bought,
-            'adidas'  # Replace with the actual category if needed
-        ))
-    except Exception as e:
-        print(f"Error inserting product: {product['title']}, Error: {e}")
+                # Wait for product elements with longer timeout
+                product_elements = WebDriverWait(driver, 20).until(
+                    EC.presence_of_all_elements_located(
+                        (By.CSS_SELECTOR, "div[data-component-type='s-search-result']")
+                    )
+                )
 
-    connection.commit()
-    cursor.close()
-    connection.close()
+                for product in product_elements:
+                    try:
+                        product_data = self._extract_product_details(product)
+                        products.append(product_data)
+                    except Exception as e:
+                        self.logger.warning(f"Error extracting product details: {e}")
 
-# Function to save products to CSV
-def save_to_csv(products):
-    df = pd.DataFrame(products)
-    df.to_csv('amazon_products.csv', index=False)
+        except Exception as e:
+            self.logger.error(f"Scraping failed: {e}")
+        finally:
+            driver.quit()
 
-# Main execution
+        return products
+
+    def _extract_product_details(self, product_element) -> Dict:
+        """Extract detailed product information with robust error handling."""
+
+        def safe_find_text(selector, default="N/A"):
+            try:
+                return product_element.find_element(
+                    By.CSS_SELECTOR, selector
+                ).text.strip()
+            except:
+                return default
+
+        return {
+            "title": safe_find_text("h2 > a > span"),
+            "price": safe_find_text(".a-price-whole"),
+            "discount": safe_find_text(".a-price.a-price-secondary"),
+            "rating": safe_find_text(".a-icon-alt"),
+            "review_count": safe_find_text(".a-size-base"),
+            "amount_bought": "N/A",
+        }
+
+    def save_to_database(self, products: List[Dict], category: str):
+        """Save products to PostgreSQL with transaction management."""
+        try:
+            with psycopg2.connect(**self.db_config) as connection:
+                with connection.cursor() as cursor:
+                    insert_query = """
+                    INSERT INTO products (name, price, discount, rating, review_count, amount_bought, category)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """
+
+                    for product in products:
+                        cursor.execute(
+                            insert_query,
+                            (
+                                product["title"],
+                                product.get("price", "N/A"),
+                                product.get("discount", "N/A"),
+                                product.get("rating", "N/A"),
+                                product.get("review_count", "N/A"),
+                                product.get("amount_bought", "N/A"),
+                                category,
+                            ),
+                        )
+                connection.commit()
+                self.logger.info(
+                    f"Successfully saved {len(products)} products to database"
+                )
+        except psycopg2.Error as e:
+            self.logger.error(f"Database error: {e}")
+
+    def save_to_csv(self, products: List[Dict], filename: str = "amazon_products.csv"):
+        """Save products to CSV with error handling."""
+        try:
+            df = pd.DataFrame(products)
+            df.to_csv(filename, index=False)
+            self.logger.info(f"Saved {len(products)} products to {filename}")
+        except Exception as e:
+            self.logger.error(f"CSV export failed: {e}")
+
+
+def main():
+    # Database configuration - consider using environment variables
+    DB_CONFIG = {
+        "dbname": os.getenv("DB_NAME", "amazon_scrapping"),
+        "user": os.getenv("DB_USER", "amazon_scrapping_user"),
+        "password": os.getenv("DB_PASSWORD", "your_password"),
+        "host": os.getenv("DB_HOST", "localhost"),
+        "port": os.getenv("DB_PORT", "5432"),
+    }
+
+    category_url = "https://www.amazon.com/s?k=laptops"
+    scraper = AmazonScraper(DB_CONFIG)
+
+    products = scraper.scrape_amazon_products(category_url)
+    scraper.save_to_database(products, category="adidas")
+    scraper.save_to_csv(products)
+
+
 if __name__ == "__main__":
-    category_url = "https://www.amazon.com/s?k=adidas"  # Replace with your specific category URL
-    products = scrape_amazon_products(category_url)
-    save_to_db(products)
-    save_to_csv(products)
-    print("Data scraping and saving completed.")
+    main()
