@@ -79,26 +79,51 @@ class AmazonScraper:
             driver.quit()
 
         return products
-
     def _extract_product_details(self, product_element) -> Dict:
         """Extract detailed product information with robust error handling."""
-
         def safe_find_text(selector, default="N/A"):
             try:
-                return product_element.find_element(
-                    By.CSS_SELECTOR, selector
-                ).text.strip()
+                return product_element.find_element(By.CSS_SELECTOR, selector).text.strip()
             except:
                 return default
 
+        def safe_find_rating(selector, default="N/A"):
+            try:
+                return WebDriverWait(product_element, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                ).get_attribute("innerText")  # Use .get_attribute("innerText")
+            except:
+                return default
+        amount_bought_raw = safe_find_text(".a-size-base.a-color-secondary")
+        amount_bought = amount_bought_raw.split('+')[0].strip() if '+' in amount_bought_raw else amount_bought_raw
+
         return {
-            "title": safe_find_text("h2 > a > span"),
+            "title": safe_find_text("h2[aria-label] > span"),
             "price": safe_find_text(".a-price-whole"),
-            "discount": safe_find_text(".a-price.a-price-secondary"),
-            "rating": safe_find_text(".a-icon-alt"),
+            "rating": safe_find_rating(".a-icon-alt"),  # Updated to use robust wait
             "review_count": safe_find_text(".a-size-base"),
-            "amount_bought": "N/A",
+            "amount_bought": amount_bought,
         }
+
+    # def _extract_product_details(self, product_element) -> Dict:
+    #     """Extract detailed product information with robust error handling."""
+
+    #     def safe_find_text(selector, default="N/A"):
+    #         try:
+    #             return product_element.find_element(
+    #                 By.CSS_SELECTOR, selector
+    #             ).text.strip()
+    #         except:
+    #             return default
+
+    #     return {
+    #         "title": safe_find_text("h2[aria-label] > span"),
+    #         "price": safe_find_text(".a-price-whole"),
+    #         # "discount": safe_find_text(".a-price.a-price-secondary"),
+    #         "rating": safe_find_text(".a-icon-alt"),
+    #         "review_count": safe_find_text(".a-size-base"),
+    #         "amount_bought": safe_find_text(".a-size-base.a-color-secondary")
+    #     }
 
     def save_to_database(self, products: List[Dict], category: str):
         """Save products to PostgreSQL with transaction management."""
@@ -150,11 +175,11 @@ def main():
         "port": os.getenv("DB_PORT", "5432"),
     }
 
-    category_url = "https://www.amazon.com/s?k=laptops"
+    category_url = "https://www.amazon.com/s?k=asus+rog+strix+g16+2024+gaming+laptop"
     scraper = AmazonScraper(DB_CONFIG)
 
     products = scraper.scrape_amazon_products(category_url)
-    scraper.save_to_database(products, category="adidas")
+    scraper.save_to_database(products, category="laptops")
     scraper.save_to_csv(products)
 
 
