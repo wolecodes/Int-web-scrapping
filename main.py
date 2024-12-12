@@ -3,6 +3,7 @@ import time
 import logging
 import pandas as pd
 import psycopg2
+from dotenv import load_dotenv
 from typing import List, Dict
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -94,60 +95,111 @@ class AmazonScraper:
                 ).get_attribute("innerText")  # Use .get_attribute("innerText")
             except:
                 return default
+         # Extract original price and current price
+        original_price_text = safe_find_text(".a-price.a-text-price")
+        current_price_text = safe_find_text(".a-price-whole")
+
+        # Extract rating and review count
+        rating_text = safe_find_rating(".a-icon-alt")  # Selector for Amazon star rating
+        review_count_text = safe_find_text(".a-size-base", default="0")  # Selector for review count
+
+        # Convert prices to float, if they exist, and then to decimal
+        original_price = float(original_price_text.replace('$', '').replace(',', '')) if original_price_text != "N/A" else None
+        current_price = float(current_price_text.replace('$', '').replace(',', '')) if current_price_text != "N/A" else None
+         # Ensure price is not None
+        if current_price is None:
+            current_price = 0
+      
+
+        try:
+            rating_value = float(rating_text.split()[0]) if rating_text != "N/A" else None
+        except (ValueError, IndexError):
+            rating_value = None
+        try:
+            review_count_value = int(review_count_text.replace(',', '')) if review_count_text != "N/A" else 0
+
+        except (ValueError, TypeError):
+            review_count_value = 0
+        discount = None
+        if original_price is not None and current_price is not None:
+            discount = original_price - current_price
+            discount = int(discount)
+
         amount_bought_raw = safe_find_text(".a-size-base.a-color-secondary")
+    
         amount_bought = amount_bought_raw.split('+')[0].strip() if '+' in amount_bought_raw else amount_bought_raw
+        try:
+            amount_bought = int(''.join(filter(str.isdigit, amount_bought)))
+        except ValueError:
+            amount_bought = 0 
 
         return {
-            "title": safe_find_text("h2[aria-label] > span"),
-            "price": safe_find_text(".a-price-whole"),
-            "rating": safe_find_rating(".a-icon-alt"),  # Updated to use robust wait
-            "review_count": safe_find_text(".a-size-base"),
+            "product_name": safe_find_text("h2[aria-label] > span"),
+            "price": current_price,
+            "rating":  rating_value,
+            "discount": discount,
+            "review_count": review_count_value,
             "amount_bought": amount_bought,
         }
 
-    # def _extract_product_details(self, product_element) -> Dict:
-    #     """Extract detailed product information with robust error handling."""
 
-    #     def safe_find_text(selector, default="N/A"):
-    #         try:
-    #             return product_element.find_element(
-    #                 By.CSS_SELECTOR, selector
-    #             ).text.strip()
-    #         except:
-    #             return default
-
-    #     return {
-    #         "title": safe_find_text("h2[aria-label] > span"),
-    #         "price": safe_find_text(".a-price-whole"),
-    #         # "discount": safe_find_text(".a-price.a-price-secondary"),
-    #         "rating": safe_find_text(".a-icon-alt"),
-    #         "review_count": safe_find_text(".a-size-base"),
-    #         "amount_bought": safe_find_text(".a-size-base.a-color-secondary")
-    #     }
-
-    def save_to_database(self, products: List[Dict], category: str):
+    def save_to_database(self, products: List[Dict]):
         """Save products to PostgreSQL with transaction management."""
         try:
             with psycopg2.connect(**self.db_config) as connection:
                 with connection.cursor() as cursor:
-                    insert_query = """
-                    INSERT INTO products (name, price, discount, rating, review_count, amount_bought, category)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    insert_product_query = """
+                    INSERT INTO products (Product_Name, Price, Discount)
+                    VALUES (%s, %s, %s) RETURNING Product_Id
+                    """
+                     # Insert reviews
+                    insert_review_query = """
+                    INSERT INTO Reviews (Product_Id, Rating, Review_Count)
+                    VALUES (%s, %s, %s)
+                    """
+                    # Insert sales
+                    insert_sales_query = """
+                    INSERT INTO Sales (Product_Id, Amount_Bought)
+                    VALUES (%s, %s)
                     """
 
                     for product in products:
                         cursor.execute(
-                            insert_query,
+                            insert_product_query,
                             (
-                                product["title"],
-                                product.get("price", "N/A"),
-                                product.get("discount", "N/A"),
-                                product.get("rating", "N/A"),
-                                product.get("review_count", "N/A"),
-                                product.get("amount_bought", "N/A"),
-                                category,
+                                product["product_name"],
+                                product.get("price", 0),
+                                product.get("discount", 0),
                             ),
                         )
+                        product_id = cursor.fetchone()[0]
+                        # Insert Review
+                        cursor.execute(
+                            insert_review_query,
+                            (
+                                product_id,
+                                product.get("rating", None),
+                                product.get("review_count", 0),
+                            ),
+                        )
+                                                # Insert Review
+                        cursor.execute(
+                            insert_review_query,
+                            (
+                                product_id,
+                                product.get("rating", None),
+                                product.get("review_count", 0),
+                            ),
+                        )
+                        # Insert Sales
+                        cursor.execute(
+                            insert_sales_query,
+                            (
+                                product_id,
+                                product.get("amount_bought", 0),
+                            ),
+                        )
+
                 connection.commit()
                 self.logger.info(
                     f"Successfully saved {len(products)} products to database"
@@ -158,15 +210,39 @@ class AmazonScraper:
     def save_to_csv(self, products: List[Dict], filename: str = "amazon_products.csv"):
         """Save products to CSV with error handling."""
         try:
-            df = pd.DataFrame(products)
-            df.to_csv(filename, index=False)
-            self.logger.info(f"Saved {len(products)} products to {filename}")
+            products_df = pd.DataFrame([
+                {
+                    "Product_Id": None,
+                    "Product_Name": p["product_name"],
+                    "Price": p.get("price", 0),
+                    "Discount": p.get("discount", 0)
+                } for p in products
+            ])
+            products_df.to_csv("products.csv", index= False)
+
+            reviews_df = pd.DataFrame([
+                {
+                    "Product_Id": None,  # Will be populated after database insertion
+                    "Rating": p.get("rating", None),
+                    "Review_Count": p.get("review_count", 0)
+                } for p in products
+            ])
+            reviews_df.to_csv("reviews.csv", index=False)
+
+            sales_df = pd.DataFrame([
+                {
+                    "Product_Id": None,  # Will be populated after database insertion
+                    "Amount_Bought": p.get("amount_bought", 0),
+                } for p in products
+            ])
+            sales_df.to_csv("sales.csv", index=False)
+
         except Exception as e:
             self.logger.error(f"CSV export failed: {e}")
 
-
 def main():
     # Database configuration - consider using environment variables
+    load_dotenv()
     DB_CONFIG = {
         "dbname": os.getenv("DB_NAME", "amazon_scrapping"),
         "user": os.getenv("DB_USER", "amazon_scrapping_user"),
@@ -179,7 +255,7 @@ def main():
     scraper = AmazonScraper(DB_CONFIG)
 
     products = scraper.scrape_amazon_products(category_url)
-    scraper.save_to_database(products, category="laptops")
+    scraper.save_to_database(products)
     scraper.save_to_csv(products)
 
 
